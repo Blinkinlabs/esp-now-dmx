@@ -1,4 +1,5 @@
 #include <string.h>
+#include <assert.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/timers.h"
 #include "nvs_flash.h"
@@ -218,6 +219,11 @@ static void wifi_init()
     tcpip_adapter_init();
     ESP_ERROR_CHECK( esp_event_loop_init(example_event_handler, NULL) );
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+
+    // From: https://hackaday.io/project/161896-linux-espnow/log/161046-implementation
+    // Disable AMPDU to allow the bit rate to be changed
+    cfg.ampdu_tx_enable = 0;                             //... and modify only what we want.
+
     ESP_ERROR_CHECK( esp_wifi_init(&cfg) );
     ESP_ERROR_CHECK( esp_wifi_set_storage(WIFI_STORAGE_RAM) );
     ESP_ERROR_CHECK( esp_wifi_set_mode(ESPNOW_WIFI_MODE) );
@@ -227,12 +233,13 @@ static void wifi_init()
     // This is not necessary in real application if the two devices have
     // been already on the same channel.
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
-    ESP_ERROR_CHECK( esp_wifi_set_channel(CONFIG_ESPNOW_CHANNEL, 0) );
+    ESP_ERROR_CHECK( esp_wifi_set_channel(CONFIG_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE) );
 
 
     // From: https://www.esp32.com/viewtopic.php?t=9965
     // Attempt to change the wifi modulation speed
-//    esp_wifi_internal_set_fix_rate(ESPNOW_WIFI_IF, 1, WIFI_PHY_RATE_MCS7_SGI);
+    // See 'esp_wifi_types.h' for a list of available data rates
+    esp_wifi_internal_set_fix_rate(ESP_IF_WIFI_STA, true, WIFI_PHY_RATE_54M);
 
 
 #if CONFIG_ENABLE_LONG_RANGE

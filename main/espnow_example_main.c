@@ -12,7 +12,7 @@
 
 #include "espnow_transponder.h"
 
-#define UNIVERSE_COUNT 15
+#define UNIVERSE_COUNT 30
 //#define ROLE_SENDER
 
 #if defined(ROLE_SENDER)
@@ -98,15 +98,9 @@ void receive_packet(const uint8_t *data, uint8_t data_length) {
     universe_stats_record(header->universe, header->sequence);
 }
 
-void app_main()
-{
-    universe_stats_init();
-
-    espnow_transponder_init();
-    espnow_transponder_register_callback(receive_packet);
-
-#if defined(ROLE_SENDER)
-    const uint32_t framedelay_ms = (1000/30);
+//! \brief Send test packets at a specified framerate
+void transmitter_test() {
+    const uint32_t framedelay_ms = (1000/100);
 
     ESP_LOGI(TAG, "Starting sender mode...");
 
@@ -123,16 +117,33 @@ void app_main()
     while(true) {
         vTaskDelay(framedelay_ms/portTICK_RATE_MS);
 
-        for(int universe = 0; universe < 10; universe++)
+        for(int universe = 0; universe < UNIVERSE_COUNT; universe++)
             send_artdmx_packet(universe, sequence, data, sizeof(data));
 
         sequence++;
     }
-#else
+}
+
+//! \brief Listen for packets, and report on their status periodically
+void receiver_test() {
     ESP_LOGI(TAG, "Starting receiver mode");
     while(true) {
         vTaskDelay(1000/portTICK_RATE_MS);
         universe_stats_print();
     }
+}
+
+void app_main()
+{
+    universe_stats_init();
+
+    espnow_transponder_init();
+    espnow_transponder_register_callback(receive_packet);
+
+#if defined(ROLE_SENDER)
+    transmitter_test();
+
+#else
+    receiver_test();
 #endif
 }
