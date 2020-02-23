@@ -1,20 +1,12 @@
-#include <stdlib.h>
-#include <time.h>
 #include <string.h>
-#include <assert.h>
 #include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
 #include "freertos/timers.h"
 #include "nvs_flash.h"
 #include "esp_event_loop.h"
-#include "tcpip_adapter.h"
 #include "esp_wifi.h"
 #include "esp_log.h"
-#include "esp_system.h"
 #include "esp_now.h"
-#include "rom/ets_sys.h"
 #include "rom/crc.h"
-#include "espnow_example.h"
 
 #include "espnow_transponder.h"
 
@@ -61,63 +53,29 @@ typedef union {
 
 // When ESPNOW sending or receiving callback function is called, post event to ESPNOW task.
 typedef struct {
-    example_espnow_event_id_t id;
-    example_espnow_event_info_t info;
+    example_espnow_event_id_t id;       //!< Callback event type
+    example_espnow_event_info_t info;   //!< Callback event data
 } example_espnow_event_t;
-
-
 
 //! Packet format for espnow_transponder packets
 typedef struct {
-    uint16_t crc;
-    uint8_t data_length;
-    uint8_t data[0];
+    uint16_t crc;                       //!< 16-bit CRC, calculated with crc16_le()
+    uint8_t data_length;                //!< Length of the data payload
+    uint8_t data[0];                    //!< First element of the data payload
 } __attribute__((packed)) espnow_transponder_packet_t;
 
+//! Internal queue for handling espnow rx and tx callbacks
 static xQueueHandle espnow_transponder_queue;
+
+//! Pointer to the user function that is called when a packet is successfully received
 static espnow_transponder_rx_callback_t rx_callback = NULL;
 
-void espnow_transponder_register_callback(espnow_transponder_rx_callback_t callback) {
-    rx_callback = callback;
-}
-
-void espnow_transponder_unregister_callback() {
-    rx_callback = NULL;
-}
-
-esp_err_t espnow_transponder_send(const uint8_t *data, uint8_t data_length) {
-    // Encapsulate the data into a packet with the following structure:
-    // packet[0-1]: 16-bit CRC
-    // packet[2]: data length
-    // packet[3-n]: data
-
-    const uint8_t packet_length = sizeof(espnow_transponder_packet_t) - 1 + data_length;
-
-    // Check that the total length is under ESP_NOW_MAX_DATA_LEN
-    if(packet_length > ESP_NOW_MAX_DATA_LEN) {
-        ESP_LOGE(TAG, "Packet too big, can't transmit size:%i max:%i", packet_length, ESP_NOW_MAX_DATA_LEN);
-        return ESP_FAIL;
-    }
-
-    uint8_t packet_data[packet_length];
-
-    espnow_transponder_packet_t *header = (espnow_transponder_packet_t *)packet_data;
-    header->crc = 0;
-    header->data_length = data_length;
-    memcpy(header->data, data, data_length);
-
-    header->crc = crc16_le(UINT16_MAX, packet_data, packet_length);
-
-    // TODO: Add length, CRC header
-    return esp_now_send(s_example_broadcast_mac, packet_data, packet_length);
-}
-
-//! @brief Check if a buffer contains a valid espnow_transponder_packet_t
+//! \brief Check if a buffer contains a valid espnow_transponder_packet_t
 //!
 //! \param data Pointer to the data packet
 //! \param data_len Length of the data packet
 //! \return True if the packet passed CRC + data length checks
-bool parse_packet(uint8_t *packet, uint16_t packet_length)
+static bool parse_packet(uint8_t *packet, uint16_t packet_length)
 {
     // Check the the packet can fit the header
     if (packet_length < sizeof(espnow_transponder_packet_t)) {
@@ -157,9 +115,14 @@ static esp_err_t example_event_handler(void *ctx, system_event_t *event)
     return ESP_OK;
 }
 
-/* ESPNOW sending or receiving callback function is called in WiFi task.
- * Users should not do lengthy operations from this task. Instead, post
- * necessary data to a queue and handle it from a lower priority task. */
+//! \brief ESP-NOW transmit callback function
+//!
+//! ESPNOW sending or receiving callback function is called in WiFi task.
+//! Users should not do lengthy operations from this task. Instead, post
+//! necessary data to a queue and handle it from a lower priority task.
+//!
+//! \param mac_addr MAC address that the packet was sent to
+//! \param status transmit status
 static void example_espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status)
 {
     example_espnow_event_t evt;
@@ -178,9 +141,15 @@ static void example_espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_
     }
 }
 
-/* ESPNOW sending or receiving callback function is called in WiFi task.
- * Users should not do lengthy operations from this task. Instead, post
- * necessary data to a queue and handle it from a lower priority task. */
+//! \brief ESP-NOW receive callback function
+//!
+//! ESPNOW sending or receiving callback function is called in WiFi task.
+//! Users should not do lengthy operations from this task. Instead, post
+//! necessary data to a queue and handle it from a lower priority task.
+//!
+//! \param mac_addr MAC address of the device that sent the packet
+//! \param data Pointer to the packet data
+//! \param len Length of the packet data
 static void example_espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
 {
     example_espnow_event_t evt;
@@ -193,20 +162,23 @@ static void example_espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data,
 
     evt.id = EXAMPLE_ESPNOW_RECV_CB;
     memcpy(recv_cb->mac_addr, mac_addr, ESP_NOW_ETH_ALEN);
+
     recv_cb->data = malloc(len);
     if (recv_cb->data == NULL) {
         ESP_LOGE(TAG, "Malloc receive data fail");
         return;
     }
+
     memcpy(recv_cb->data, data, len);
     recv_cb->data_len = len;
+
     if (xQueueSend(espnow_transponder_queue, &evt, portMAX_DELAY) != pdTRUE) {
         ESP_LOGW(TAG, "Send receive queue fail");
         free(recv_cb->data);
     }
 }
 
-//! @brief TX/RX callback handler task
+//! \brief TX/RX callback handler task
 static void example_espnow_task(void *pvParameter)
 {
     example_espnow_event_t evt;
@@ -240,8 +212,8 @@ static void example_espnow_task(void *pvParameter)
     }
 }
 
-//! @brief Initialize WiFi for use with ESP-NOW
-static void wifi_init(void)
+//! \brief Initialize WiFi for use with ESP-NOW
+static void wifi_init()
 {
     tcpip_adapter_init();
     ESP_ERROR_CHECK( esp_event_loop_init(example_event_handler, NULL) );
@@ -268,8 +240,47 @@ static void wifi_init(void)
 #endif
 }
 
-//! @brief Initialize the ESP-NOW interface
-static esp_err_t espnow_init(void)
+int espnow_transponder_max_packet_size() {
+    return ESP_NOW_MAX_DATA_LEN - (sizeof(espnow_transponder_packet_t) - 1);
+}
+
+void espnow_transponder_register_callback(espnow_transponder_rx_callback_t callback) {
+    rx_callback = callback;
+}
+
+void espnow_transponder_unregister_callback() {
+    rx_callback = NULL;
+}
+
+esp_err_t espnow_transponder_send(const uint8_t *data, uint8_t data_length) {
+    // Encapsulate the data into a packet with the following structure:
+    // packet[0-1]: 16-bit CRC
+    // packet[2]: data length
+    // packet[3-n]: data
+
+    const uint8_t packet_length = sizeof(espnow_transponder_packet_t) - 1 + data_length;
+
+    // Check that the total length is under ESP_NOW_MAX_DATA_LEN
+    if(packet_length > ESP_NOW_MAX_DATA_LEN) {
+        ESP_LOGE(TAG, "Packet too big, can't transmit size:%i max:%i", packet_length, ESP_NOW_MAX_DATA_LEN);
+        return ESP_FAIL;
+    }
+
+    uint8_t packet_data[packet_length];
+
+    espnow_transponder_packet_t *header = (espnow_transponder_packet_t *)packet_data;
+    header->crc = 0;
+    header->data_length = data_length;
+    memcpy(header->data, data, data_length);
+
+    header->crc = crc16_le(UINT16_MAX, packet_data, packet_length);
+
+    // TODO: Add length, CRC header
+    return esp_now_send(s_example_broadcast_mac, packet_data, packet_length);
+}
+
+//! \brief Initialize the ESP-NOW interface
+static esp_err_t espnow_init()
 {
     espnow_transponder_queue = xQueueCreate(ESPNOW_QUEUE_SIZE, sizeof(example_espnow_event_t));
     if (espnow_transponder_queue == NULL) {
@@ -311,5 +322,5 @@ esp_err_t espnow_transponder_init() {
     wifi_init();
     espnow_init();
 
-    return ESP_OK; // TODO
+    return ESP_OK; // TODO propigate errors
 }

@@ -1,6 +1,8 @@
 #pragma once
 
-//! \brief Initialize the wifi in esp-now mode
+//! \brief Initialize the ESP-NOW transponder
+//!
+//! \return ESP_OK if successful
 esp_err_t espnow_transponder_init();
 
 //! \brief Broadcast a data packet
@@ -21,6 +23,7 @@ void espnow_transponder_register_callback(espnow_transponder_rx_callback_t callb
 void espnow_transponder_unregister_callback();
 
 
-// Get the maximum packet size
-// ESP_NOW_MAX_DATA_LEN - (sizeof(espnow_transponder_packet_t) - 1)
-//int espnow_transponder_max_packet_size();
+//! \brief Get the maximum data size that can be transmitted with espnow_transponder
+//!
+//! \return Maximum data size, in bytes.
+int espnow_transponder_max_packet_size();
