@@ -222,7 +222,7 @@ static void espnow_transponder_task(void *pvParameter)
         }
     }
 
-stop_task:
+//stop_task:
     espnow_transponder_task_hdl = NULL;
     vTaskDelete(NULL);
 }
