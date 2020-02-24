@@ -22,11 +22,10 @@ static const char *TAG = "espnow";
         return ret; \
     }
 
-// TODO
-static uint8_t s_example_broadcast_mac[ESP_NOW_ETH_ALEN] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+TaskHandle_t * espnow_transponder_task_hdl = NULL;
 
-#define ESPNOW_PMK "pmk1234567890123"
-
+//! Broadcast address
+static const uint8_t broadcast_mac[ESP_NOW_ETH_ALEN] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
 const espnow_transponder_config_t espnow_transponder_config_default = {
     .mode = WIFI_MODE_STA,
@@ -35,36 +34,38 @@ const espnow_transponder_config_t espnow_transponder_config_default = {
     .phy_rate = WIFI_PHY_RATE_MCS2_LGI,
 };
 
+// Maximum size of the ESP-NOW event queue. Up to this many messages can be
+// stored on reception. It's recommended to make the callback function process
+// data fast enough that this queue can be small.
 #define ESPNOW_QUEUE_SIZE           30
 
-#define IS_BROADCAST_ADDR(addr) (memcmp(addr, s_example_broadcast_mac, ESP_NOW_ETH_ALEN) == 0)
-
 typedef enum {
-    EXAMPLE_ESPNOW_SEND_CB,
-    EXAMPLE_ESPNOW_RECV_CB,
-} example_espnow_event_id_t;
+    ESPNOW_TRANSPONDER_SEND_CB,
+    ESPNOW_TRANSPONDER_RECV_CB,
+    ESPNOW_TRANSPONDER_STOP_TASK,
+} espnow_transponder_event_id_t;
 
 typedef struct {
     uint8_t mac_addr[ESP_NOW_ETH_ALEN];
     esp_now_send_status_t status;
-} example_espnow_event_send_cb_t;
+} espnow_transponder_event_send_cb_t;
 
 typedef struct {
     uint8_t mac_addr[ESP_NOW_ETH_ALEN];
     uint8_t *data;
     int data_len;
-} example_espnow_event_recv_cb_t;
+} espnow_transponder_event_recv_cb_t;
 
 typedef union {
-    example_espnow_event_send_cb_t send_cb;
-    example_espnow_event_recv_cb_t recv_cb;
-} example_espnow_event_info_t;
+    espnow_transponder_event_send_cb_t send_cb;
+    espnow_transponder_event_recv_cb_t recv_cb;
+} espnow_transponder_event_info_t;
 
 // When ESPNOW sending or receiving callback function is called, post event to ESPNOW task.
 typedef struct {
-    example_espnow_event_id_t id;       //!< Callback event type
-    example_espnow_event_info_t info;   //!< Callback event data
-} example_espnow_event_t;
+    espnow_transponder_event_id_t id;       //!< Callback event type
+    espnow_transponder_event_info_t info;   //!< Callback event data
+} espnow_transponder_event_t;
 
 //! Packet format for espnow_transponder packets
 typedef struct {
@@ -74,7 +75,7 @@ typedef struct {
 } __attribute__((packed)) espnow_transponder_packet_t;
 
 //! Internal queue for handling espnow rx and tx callbacks
-static xQueueHandle espnow_transponder_queue;
+static xQueueHandle espnow_transponder_queue = NULL;
 
 //! Pointer to the user function that is called when a packet is successfully received
 static espnow_transponder_rx_callback_t rx_callback = NULL;
@@ -132,21 +133,21 @@ static esp_err_t example_event_handler(void *ctx, system_event_t *event)
 //!
 //! \param mac_addr MAC address that the packet was sent to
 //! \param status transmit status
-static void example_espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status)
+static void espnow_transponder_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status)
 {
-    example_espnow_event_t evt;
-    example_espnow_event_send_cb_t *send_cb = &evt.info.send_cb;
-
     if (mac_addr == NULL) {
         ESP_LOGE(TAG, "Send cb arg error");
         return;
     }
 
-    evt.id = EXAMPLE_ESPNOW_SEND_CB;
-    memcpy(send_cb->mac_addr, mac_addr, ESP_NOW_ETH_ALEN);
-    send_cb->status = status;
+    espnow_transponder_event_t evt = {
+            .id = ESPNOW_TRANSPONDER_SEND_CB,
+            .info.send_cb.status = status,
+    };
+    memcpy(evt.info.send_cb.mac_addr, mac_addr, sizeof(evt.info.send_cb.mac_addr));
+
     if (xQueueSend(espnow_transponder_queue, &evt, portMAX_DELAY) != pdTRUE) {
-        ESP_LOGW(TAG, "Send send queue fail");
+        ESP_LOGW(TAG, "Send to queue fail");
     }
 }
 
@@ -159,50 +160,48 @@ static void example_espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_
 //! \param mac_addr MAC address of the device that sent the packet
 //! \param data Pointer to the packet data
 //! \param len Length of the packet data
-static void example_espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
+static void espnow_transponder_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
 {
-    example_espnow_event_t evt;
-    example_espnow_event_recv_cb_t *recv_cb = &evt.info.recv_cb;
-
     if (mac_addr == NULL || data == NULL || len <= 0) {
         ESP_LOGE(TAG, "Receive cb arg error");
         return;
     }
 
-    evt.id = EXAMPLE_ESPNOW_RECV_CB;
-    memcpy(recv_cb->mac_addr, mac_addr, ESP_NOW_ETH_ALEN);
+    espnow_transponder_event_t evt = {
+        .id = ESPNOW_TRANSPONDER_RECV_CB,
+        .info.recv_cb.data_len = len,
+    };
+    memcpy(evt.info.recv_cb.mac_addr, mac_addr, sizeof(evt.info.recv_cb.mac_addr));
 
-    recv_cb->data = malloc(len);
-    if (recv_cb->data == NULL) {
+    evt.info.recv_cb.data = malloc(len);
+    if (evt.info.recv_cb.data == NULL) {
         ESP_LOGE(TAG, "Malloc receive data fail");
         return;
     }
-
-    memcpy(recv_cb->data, data, len);
-    recv_cb->data_len = len;
+    memcpy(evt.info.recv_cb.data, data, len);
 
     if (xQueueSend(espnow_transponder_queue, &evt, portMAX_DELAY) != pdTRUE) {
-        ESP_LOGW(TAG, "Send receive queue fail");
-        free(recv_cb->data);
+        ESP_LOGW(TAG, "Send to queue fail");
+        free(evt.info.recv_cb.data);
     }
 }
 
 //! \brief TX/RX callback handler task
-static void example_espnow_task(void *pvParameter)
+static void espnow_transponder_task(void *pvParameter)
 {
-    example_espnow_event_t evt;
+    espnow_transponder_event_t evt;
 
     while (xQueueReceive(espnow_transponder_queue, &evt, portMAX_DELAY) == pdTRUE) {
         switch (evt.id) {
-            case EXAMPLE_ESPNOW_SEND_CB:
+            case ESPNOW_TRANSPONDER_SEND_CB:
             {
-                example_espnow_event_send_cb_t *send_cb = &evt.info.send_cb;
+                espnow_transponder_event_send_cb_t *send_cb = &evt.info.send_cb;
                 ESP_LOGD(TAG, "Sent data to "MACSTR", status1: %d", MAC2STR(send_cb->mac_addr), send_cb->status);
                 break;
             }
-            case EXAMPLE_ESPNOW_RECV_CB:
+            case ESPNOW_TRANSPONDER_RECV_CB:
             {
-                example_espnow_event_recv_cb_t *recv_cb = &evt.info.recv_cb;
+                espnow_transponder_event_recv_cb_t *recv_cb = &evt.info.recv_cb;
 
                 const bool ret = parse_packet(recv_cb->data, recv_cb->data_len);
                 if(ret == true) {
@@ -214,11 +213,18 @@ static void example_espnow_task(void *pvParameter)
                 free(recv_cb->data);
                 break;
             }
+//            case ESPNOW_TRANSPONDER_STOP_TASK:
+//                goto stop_task;
+//                break;
             default:
                 ESP_LOGE(TAG, "Callback type error: %d", evt.id);
                 break;
         }
     }
+
+stop_task:
+    espnow_transponder_task_hdl = NULL;
+    vTaskDelete(NULL);
 }
 
 //! \brief Initialize WiFi for use with ESP-NOW
@@ -228,7 +234,11 @@ static esp_err_t wifi_init(const espnow_transponder_config_t *config)
 
     esp_err_t ret;
 
-    ESPNOW_ERROR_CHECK(esp_event_loop_init(example_event_handler, NULL), "event_loop_init");
+    // Don't fail if the event loop was already registered, it's not needed for this component.
+    ret = esp_event_loop_init(example_event_handler, NULL);
+    if(ret != ESP_OK) {
+        ESP_LOGW(TAG, "Error running esp_event_loop_init, err:%s", esp_err_to_name(ret));
+    }
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
 
@@ -263,7 +273,7 @@ static esp_err_t wifi_init(const espnow_transponder_config_t *config)
 //! \brief Initialize the ESP-NOW interface
 static esp_err_t espnow_init(const espnow_transponder_config_t *config)
 {
-    espnow_transponder_queue = xQueueCreate(ESPNOW_QUEUE_SIZE, sizeof(example_espnow_event_t));
+    espnow_transponder_queue = xQueueCreate(ESPNOW_QUEUE_SIZE, sizeof(espnow_transponder_event_t));
     if (espnow_transponder_queue == NULL) {
         ESP_LOGE(TAG, "Create queue fail");
         return ESP_FAIL;
@@ -274,15 +284,8 @@ static esp_err_t espnow_init(const espnow_transponder_config_t *config)
     // Initialize ESPNOW and register sending and receiving callback function.
     ESPNOW_ERROR_CHECK(esp_now_init(), "esp_now_init");
 
-    ESPNOW_ERROR_CHECK(esp_now_register_send_cb(example_espnow_send_cb), "esp_now_register_send_cb");
-    ESPNOW_ERROR_CHECK(esp_now_register_recv_cb(example_espnow_recv_cb), "esp_now_register_recv_cb");
-
-//    // Set primary master key.
-//    ret = esp_now_set_pmk((uint8_t *)ESPNOW_PMK);
-//    if(ret!= ESP_OK) {
-//        ESP_LOGE(TAG, "Error setting primary key, err:%s", esp_err_to_name(ret));
-//        return ret;
-//    }
+    ESPNOW_ERROR_CHECK(esp_now_register_send_cb(espnow_transponder_send_cb), "esp_now_register_send_cb");
+    ESPNOW_ERROR_CHECK(esp_now_register_recv_cb(espnow_transponder_recv_cb), "esp_now_register_recv_cb");
 
     const esp_interface_t interface = config->mode == WIFI_MODE_STA? ESP_IF_WIFI_STA : ESP_IF_WIFI_AP;
 
@@ -292,12 +295,15 @@ static esp_err_t espnow_init(const espnow_transponder_config_t *config)
         .ifidx = interface,
         .encrypt = false,
     };
-    memcpy(&(peer.peer_addr), s_example_broadcast_mac, sizeof(peer.peer_addr));
+    memcpy(peer.peer_addr, broadcast_mac, sizeof(peer.peer_addr));
 
     ESPNOW_ERROR_CHECK(esp_now_add_peer(&peer), "esp_now_add_peer");
 
     // TODO: error check
-    xTaskCreate(example_espnow_task, "example_espnow_task", 2048, NULL, 4, NULL);
+    if(xTaskCreate(espnow_transponder_task, "espnow_task", 2048, NULL, 4, espnow_transponder_task_hdl) != pdPASS) {
+        ESP_LOGE(TAG, "Create task fail");
+        return ESP_FAIL;
+    }
 
     return ESP_OK;
 }
@@ -338,7 +344,7 @@ esp_err_t espnow_transponder_send(const uint8_t *data, uint8_t data_length) {
     header->crc = crc16_le(UINT16_MAX, packet_data, packet_length);
 
     // TODO: Add length, CRC header
-    return esp_now_send(s_example_broadcast_mac, packet_data, packet_length);
+    return esp_now_send(broadcast_mac, packet_data, packet_length);
 }
 
 esp_err_t espnow_transponder_init(const espnow_transponder_config_t *config) {
@@ -360,3 +366,23 @@ esp_err_t espnow_transponder_init(const espnow_transponder_config_t *config) {
 
     return ESP_OK;
 }
+
+//esp_err_t espnow_transponder_stop() {
+//
+//    esp_now_deinit();
+//    esp_now_unregister_recv_cb();
+//    esp_now_unregister_send_cb();
+//    esp_now_del_peer(broadcast_mac);
+//
+//    if(espnow_transponder_queue == NULL)
+//        return ESP_FAIL;
+//
+//    espnow_transponder_event_t evt = {
+//        .id = ESPNOW_TRANSPONDER_STOP_TASK,
+//    };
+//
+//    if (xQueueSend(espnow_transponder_queue, &evt, portMAX_DELAY) != pdTRUE)
+//        return ESP_FAIL;
+//
+//    return ESP_OK;
+//}

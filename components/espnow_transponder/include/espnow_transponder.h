@@ -1,5 +1,20 @@
 #pragma once
 
+//! Send and receive broadcast packets using the ESP-NOW protocol
+//!
+//! This allows for quite high speed, somewhat reliable communication for
+//! protocols that prefer low latency over guaranteed transmission (i.e., DMX).
+//! This implementation uses broadcast packets exclusively, to remove the need
+//! for pairing. As long as all devices use the same configuration (channel and
+//! phy_rate), then they will be able to receive messages automatically.
+//! Devices can then choose which packets to respond to based on a higher level
+//! protocol (i.e., Art-Net address).
+//!
+//! Note that encryption is not supported for broadcast packets. If that is
+//! needed, a possible implementation would be to assign the same MAC address
+//! to all devices, to make 'fake' broadcasts.
+
+
 // Note: This is private header from the esp-idf, that is included for wifi_phy_rate_t.
 //       It might break across minor or major IDF versions. Consider wrapping wifi_phy_rate_t
 //       if this bothers you.
