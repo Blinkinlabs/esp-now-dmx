@@ -6,14 +6,17 @@
 #include <string.h>
 #include <esp_log.h>
 #include <esp_err.h>
+#include <math.h>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/timers.h>
 
 #include "espnow_transponder.h"
 
-#define UNIVERSE_COUNT 30
-//#define ROLE_SENDER
+#define UNIVERSE_COUNT 20
+#define FRAMERATE 44
+
+#define ROLE_SENDER
 
 #if defined(ROLE_SENDER)
 static const char *TAG = "espnow_tx";
@@ -78,7 +81,7 @@ void send_artdmx_packet(uint16_t universe, uint8_t sequence, const uint8_t *data
     // payload[0-1]: universe
     // payload[2]: sequence
     // payload[3-n]: data
-    // The next higher layer will guarintee data length and CRC, so they are not needed here.
+    // The next higher layer will guarantee data length and CRC, so they are not needed here.
 
     const int packet_len = data_length + sizeof(artdmx_packet_t) - 1;
     uint8_t packet_buffer[packet_len];
@@ -88,9 +91,9 @@ void send_artdmx_packet(uint16_t universe, uint8_t sequence, const uint8_t *data
     header->sequence = sequence;
     memcpy(header->data, data, data_length);
 
-    if(espnow_transponder_send(packet_buffer, packet_len) != ESP_OK) {
-        ESP_LOGE(TAG, "Send error");
-    }
+    esp_err_t ret = espnow_transponder_send(packet_buffer, packet_len);
+    if(ret != ESP_OK)
+        ESP_LOGE(TAG, "Send error, err=%s", esp_err_to_name(ret));
 }
 
 void receive_packet(const uint8_t *data, uint8_t data_length) {
@@ -100,27 +103,35 @@ void receive_packet(const uint8_t *data, uint8_t data_length) {
 
 //! \brief Send test packets at a specified framerate
 void transmitter_test() {
-    const uint32_t framedelay_ms = (1000/100);
+    const uint32_t framedelay_ms = (1000/FRAMERATE);
 
     ESP_LOGI(TAG, "Starting sender mode...");
 
     // Red-to-blue fade
-    uint8_t data[8*8*3];
+    const uint8_t universe_size = 240;
 
-    for(int led = 0; led<sizeof(data)/3; led++) {
-        data[led*3+0] = led;
-        data[led*3+1] = 0;
-        data[led*3+2] = (sizeof(data)/3)-led;
+    uint8_t *buffer = malloc(universe_size*UNIVERSE_COUNT);
+    if(buffer == NULL) {
+        ESP_LOGE(TAG, "Could not allocate memory for buffer");
+        return;
     }
 
     uint8_t sequence = 0;
+    float phase = 0;
     while(true) {
-        vTaskDelay(framedelay_ms/portTICK_RATE_MS);
+        for(int led = 0; led<(universe_size*UNIVERSE_COUNT)/3; led++) {
+            buffer[led*3+0] = (int)(30*(sin(phase+led/100.0)+1));
+            buffer[led*3+1] = 0;
+            buffer[led*3+2] = 0;
+        }
 
         for(int universe = 0; universe < UNIVERSE_COUNT; universe++)
-            send_artdmx_packet(universe, sequence, data, sizeof(data));
+            send_artdmx_packet(universe, sequence, buffer+(universe*universe_size), universe_size);
 
+        phase += .2;
         sequence++;
+
+//        vTaskDelay(framedelay_ms/portTICK_RATE_MS);
     }
 }
 
@@ -137,7 +148,7 @@ void app_main()
 {
     universe_stats_init();
 
-    espnow_transponder_init();
+    espnow_transponder_init(&espnow_transponder_config_default);
     espnow_transponder_register_callback(receive_packet);
 
 #if defined(ROLE_SENDER)
