@@ -24,6 +24,8 @@ static const char *TAG = "espnow";
 
 TaskHandle_t * espnow_transponder_task_hdl = NULL;
 
+static espnow_transponder_stats_t espnow_transponder_stats;
+
 //! Broadcast address
 static const uint8_t broadcast_mac[ESP_NOW_ETH_ALEN] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
@@ -70,8 +72,8 @@ typedef struct {
 //! Packet format for espnow_transponder packets
 typedef struct {
     uint16_t crc;                       //!< 16-bit CRC, calculated with crc16_le()
-    uint8_t data_length;                //!< Length of the data payload
-    uint8_t data[0];                    //!< First element of the data payload
+    uint8_t data_length;                //!< Length of the data payload TODO: If ESP-NOW length is reliable, drop this
+    uint8_t data[];                     //!< First element of the data payload
 } __attribute__((packed)) espnow_transponder_packet_t;
 
 //! Internal queue for handling espnow rx and tx callbacks
@@ -85,11 +87,12 @@ static espnow_transponder_rx_callback_t rx_callback = NULL;
 //! \param data Pointer to the data packet
 //! \param data_len Length of the data packet
 //! \return True if the packet passed CRC + data length checks
-static bool parse_packet(uint8_t *packet, uint16_t packet_length)
+static bool packet_check(uint8_t *packet, uint16_t packet_length)
 {
     // Check the the packet can fit the header
     if (packet_length < sizeof(espnow_transponder_packet_t)) {
         ESP_LOGE(TAG, "Receive ESPNOW data too short, len:%i, minimum:%i", packet_length, sizeof(espnow_transponder_packet_t));
+        espnow_transponder_stats.rx_short_packet++;
         return false;
     }
 
@@ -97,16 +100,20 @@ static bool parse_packet(uint8_t *packet, uint16_t packet_length)
 
     // Check the CRC
     const uint16_t crc = header->crc;
-    header->crc = 0;    // Feed this back so we don't have to overwrite it
+    header->crc = 0;    // TODO: Feed this into the CRC so we don't have to overwrite it
     const uint16_t crc_cal = crc16_le(UINT16_MAX, packet, packet_length);
     if(crc_cal != crc) {
         ESP_LOGE(TAG, "Failed CRC check, expected:%04x got:%04x", crc, crc_cal);
+
+        espnow_transponder_stats.rx_bad_crc++;
         return false;
     }
 
-    const uint16_t expected_length = sizeof(espnow_transponder_packet_t) - 1 + header->data_length;
+    const uint16_t expected_length = sizeof(espnow_transponder_packet_t) + header->data_length;
     if(expected_length != packet_length) {
         ESP_LOGE(TAG, "Invalid length, expected:%i got:%i", expected_length, packet_length);
+
+        espnow_transponder_stats.rx_bad_len++;
         return false;
     }
 
@@ -149,6 +156,8 @@ static void espnow_transponder_send_cb(const uint8_t *mac_addr, esp_now_send_sta
     if (xQueueSend(espnow_transponder_queue, &evt, portMAX_DELAY) != pdTRUE) {
         ESP_LOGW(TAG, "Send to queue fail");
     }
+
+    espnow_transponder_stats.tx_count++;
 }
 
 //! \brief ESP-NOW receive callback function
@@ -166,6 +175,11 @@ static void espnow_transponder_recv_cb(const uint8_t *mac_addr, const uint8_t *d
         ESP_LOGE(TAG, "Receive cb arg error");
         return;
     }
+    
+    if(!packet_check(data, len)) {
+        ESP_LOGE(TAG, "Packet check failed");
+        return;
+    }
 
     espnow_transponder_event_t evt = {
         .id = ESPNOW_TRANSPONDER_RECV_CB,
@@ -176,6 +190,8 @@ static void espnow_transponder_recv_cb(const uint8_t *mac_addr, const uint8_t *d
     evt.info.recv_cb.data = malloc(len);
     if (evt.info.recv_cb.data == NULL) {
         ESP_LOGE(TAG, "Malloc receive data fail");
+
+        espnow_transponder_stats.rx_malloc_fail++;
         return;
     }
     memcpy(evt.info.recv_cb.data, data, len);
@@ -184,6 +200,8 @@ static void espnow_transponder_recv_cb(const uint8_t *mac_addr, const uint8_t *d
         ESP_LOGW(TAG, "Send to queue fail");
         free(evt.info.recv_cb.data);
     }
+
+    espnow_transponder_stats.rx_count++;
 }
 
 //! \brief TX/RX callback handler task
@@ -203,13 +221,11 @@ static void espnow_transponder_task(void *pvParameter)
             {
                 espnow_transponder_event_recv_cb_t *recv_cb = &evt.info.recv_cb;
 
-                const bool ret = parse_packet(recv_cb->data, recv_cb->data_len);
-                if(ret == true) {
-                    if(rx_callback != NULL) {
-                        espnow_transponder_packet_t *packet = (espnow_transponder_packet_t *)recv_cb->data;
-                        rx_callback(packet->data, packet->data_length);
-                    }
+                if(rx_callback != NULL) {
+                    espnow_transponder_packet_t *packet = (espnow_transponder_packet_t *)recv_cb->data;
+                    rx_callback(packet->data, packet->data_length);
                 }
+
                 free(recv_cb->data);
                 break;
             }
@@ -309,7 +325,7 @@ static esp_err_t espnow_init(const espnow_transponder_config_t *config)
 }
 
 int espnow_transponder_max_packet_size() {
-    return ESP_NOW_MAX_DATA_LEN - (sizeof(espnow_transponder_packet_t) - 1);
+    return ESP_NOW_MAX_DATA_LEN - sizeof(espnow_transponder_packet_t);
 }
 
 void espnow_transponder_register_callback(espnow_transponder_rx_callback_t callback) {
@@ -326,7 +342,7 @@ esp_err_t espnow_transponder_send(const uint8_t *data, uint8_t data_length) {
     // packet[2]: data length
     // packet[3-n]: data
 
-    const uint8_t packet_length = sizeof(espnow_transponder_packet_t) - 1 + data_length;
+    const uint8_t packet_length = sizeof(espnow_transponder_packet_t) + data_length;
 
     // Check that the total length is under ESP_NOW_MAX_DATA_LEN
     if(packet_length > ESP_NOW_MAX_DATA_LEN) {
@@ -334,17 +350,19 @@ esp_err_t espnow_transponder_send(const uint8_t *data, uint8_t data_length) {
         return ESP_FAIL;
     }
 
-    uint8_t packet_data[packet_length];
+    uint8_t packet[packet_length];
 
-    espnow_transponder_packet_t *header = (espnow_transponder_packet_t *)packet_data;
+    espnow_transponder_packet_t *header = (espnow_transponder_packet_t *)packet;
     header->crc = 0;
     header->data_length = data_length;
     memcpy(header->data, data, data_length);
 
-    header->crc = crc16_le(UINT16_MAX, packet_data, packet_length);
+    header->crc = crc16_le(UINT16_MAX, packet, packet_length);
+
+    ESP_LOGD(TAG, "header_len:%i data_lenth:%i packet_length%i", sizeof(espnow_transponder_packet_t),data_length, packet_length);
 
     // TODO: Add length, CRC header
-    return esp_now_send(broadcast_mac, packet_data, packet_length);
+    return esp_now_send(broadcast_mac, packet, packet_length);
 }
 
 esp_err_t espnow_transponder_init(const espnow_transponder_config_t *config) {
@@ -367,6 +385,9 @@ esp_err_t espnow_transponder_init(const espnow_transponder_config_t *config) {
     return ESP_OK;
 }
 
+//! \brief Stop the ESP-NOW transponder
+//!
+//! Note: Need to test, correctly handle queue deletion
 //esp_err_t espnow_transponder_stop() {
 //
 //    esp_now_deinit();
@@ -386,3 +407,9 @@ esp_err_t espnow_transponder_init(const espnow_transponder_config_t *config) {
 //
 //    return ESP_OK;
 //}
+
+void espnow_transponder_get_statistics(espnow_transponder_stats_t *stats) {
+
+    // Note: There's no contention system here, so they might change during copy.
+    memcpy(stats, &espnow_transponder_stats, sizeof(espnow_transponder_stats_t));
+}

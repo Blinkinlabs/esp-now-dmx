@@ -39,6 +39,16 @@ typedef struct {
     wifi_phy_rate_t phy_rate;       //!< PHY rate (defined in esp_wifi_types.h)
 } espnow_transponder_config_t;
 
+//! Transponder staticstics
+typedef struct {
+    uint64_t rx_count;
+    uint64_t rx_short_packet;
+    uint64_t rx_bad_crc;
+    uint64_t rx_bad_len;
+    uint64_t rx_malloc_fail;
+    uint64_t tx_count;
+} espnow_transponder_stats_t;
+
 //! Default transponder configuration
 extern const espnow_transponder_config_t espnow_transponder_config_default;
 
@@ -69,8 +79,12 @@ void espnow_transponder_register_callback(espnow_transponder_rx_callback_t callb
 //! \brief Unregister the received data callback function
 void espnow_transponder_unregister_callback();
 
-
 //! \brief Get the maximum data size that can be transmitted with espnow_transponder
 //!
 //! \return Maximum data size, in bytes.
 int espnow_transponder_max_packet_size();
+
+//! \brief Get transmission statistics for the espnow transponder
+//!
+//! \param stats Pointer to copy staticss to
+void espnow_transponder_get_statistics(espnow_transponder_stats_t *stats);

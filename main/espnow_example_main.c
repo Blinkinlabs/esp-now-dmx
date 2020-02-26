@@ -24,13 +24,18 @@ static const char *TAG = "espnow_tx";
 static const char *TAG = "espnow_rx";
 #endif
 
-/* User defined field of ESPNOW data in this example. */
+//! Data structure for an ARTDMX packet
+//!
+//! Note: Unfortunately ESP-NOW packets have a maximum length of 250, so they
+//!       can send a little less than half of a full DMX512 network. This
+//!       implementation just discards any data that doesn't fit. A more
+//!       complete implementation might add an offset field, and fragment the
+//!       Art-Net packet into several ESP-NOW packets.
 typedef struct {
-    uint16_t universe;
-    uint8_t sequence;
-    uint8_t data[0];
+    uint16_t universe;                  //!< DMX universe for this data
+    uint8_t sequence;                   //!< Sequence number
+    uint8_t data[];                     //!< DMX data
 } __attribute__((packed)) artdmx_packet_t;
-
 
 typedef struct {
     uint32_t count;
@@ -68,8 +73,6 @@ void universe_stats_record(uint16_t universe, uint8_t sequence) {
     stat->last_sequence = sequence;
 }
 
-
-
 //! @brief Broadcast data to the specified universe
 //!
 //! \param universe Art-Net universe to send to
@@ -83,13 +86,15 @@ void send_artdmx_packet(uint16_t universe, uint8_t sequence, const uint8_t *data
     // payload[3-n]: data
     // The next higher layer will guarantee data length and CRC, so they are not needed here.
 
-    const int packet_len = data_length + sizeof(artdmx_packet_t) - 1;
+    const int packet_len = data_length + sizeof(artdmx_packet_t);
     uint8_t packet_buffer[packet_len];
 
     artdmx_packet_t *header = (artdmx_packet_t *)packet_buffer;
     header->universe = universe;
     header->sequence = sequence;
     memcpy(header->data, data, data_length);
+
+    //ESP_LOGI(TAG, "uni:%i, len:%i d[238]:%02x d[239]:%02x", universe, data_length, data[238], data[239]);
 
     esp_err_t ret = espnow_transponder_send(packet_buffer, packet_len);
     if(ret != ESP_OK)
